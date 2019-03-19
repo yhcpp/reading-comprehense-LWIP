@@ -1,0 +1,1 @@
+source insight配置文件，通过options--load configuration加载，这样可以直接进行中文注释及中文备注查看.txt
