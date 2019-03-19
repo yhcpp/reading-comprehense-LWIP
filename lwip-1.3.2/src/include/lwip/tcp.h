@@ -521,8 +521,10 @@ err_t lwip_tcp_event(void *arg, struct tcp_pcb *pcb,
 #endif /* LWIP_EVENT_API */
 
 //tcp报文缓冲结构体，并不是真正的开辟一个缓冲区，而是一个链表。
-//每一个tcp控制块
-
+//每一个tcp控制块(tcp_pcb)都有三个tcp报文缓存队列，
+//没有发送的队列unsent; 
+//发送了还没有确认队列unacked;
+//接收到的无序报文队列ooseq;  
 /* This structure represents a TCP segment on the unsent and unacked queues */
 struct tcp_seg {
   struct tcp_seg *next;    //链表/* used when putting segements on a queue */

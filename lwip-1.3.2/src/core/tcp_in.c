@@ -284,22 +284,32 @@ tcp_input(struct pbuf *p, struct netif *inp)
     recv_flags = 0;
 
     /* If there is data which was previously "refused" by upper layer */
+    //处理一下，上次接收到的数据，但是上一次因为各种原因并没有被处理，所以这一次处理一下
     if (pcb->refused_data != NULL) {
       /* Notify again application with data previously received. */
       LWIP_DEBUGF(TCP_INPUT_DEBUG, ("tcp_input: notify kept packet\n"));
-      TCP_EVENT_RECV(pcb, pcb->refused_data, ERR_OK, err);
-      if (err == ERR_OK) {
+      TCP_EVENT_RECV(pcb, pcb->refused_data, ERR_OK, err);//回调用户的recv函数进行处理上一次的数据
+      if (err == ERR_OK) {//返回ok，则清空数据
         pcb->refused_data = NULL;
-      } else {
+      } else {//直接把pbuf给释放掉，因为应用层没处理掉，而且refused_data又满了，所以直接把这包数据丢掉
+              //这里为啥丢掉，而不是和上一次的refused_data连接一块，我猜，因为lwip认为上层不处理，就缓冲一次的，要是每次都缓存，内存refused_data伤不起
         /* drop incoming packets, because pcb is "full" */
         LWIP_DEBUGF(TCP_INPUT_DEBUG, ("tcp_input: drop incoming packets, because pcb is \"full\"\n"));
-        TCP_STATS_INC(tcp.drop);
-        snmp_inc_tcpinerrs();
+        TCP_STATS_INC(tcp.drop);//tcp抛掉的包数也加1
+        snmp_inc_tcpinerrs();//tcp错误包加1
         pbuf_free(p);
         return;
       }
     }
-    tcp_input_pcb = pcb;
+    /*//走到这里，开始真正的tcp包处理了，
+    能走到这里，就是说
+    1 在active找到了pcb
+    2 在time waite 和 listen没找到pcb
+    3 并且没有上次未处理的数据，或者有上次未处理的数据，这次调用应用层recv函数成功处理了
+    */
+    tcp_input_pcb = pcb;/**/
+
+    /*调用tcp_process来处理报文，主要是tcp状态机的代码，tcp各种状态之间的迁移*/
     err = tcp_process(pcb);
     /* A return value of ERR_ABRT means that tcp_abort() was called
        and that the pcb has been freed. If so, we don't do anything. */
@@ -542,26 +552,26 @@ tcp_process(struct tcp_pcb *pcb)
   err = ERR_OK;
 
   /* Process incoming RST segments. */
-  if (flags & TCP_RST) {
+  if (flags & TCP_RST) {/*flags在tcp_input函数中进行刷新的*/
     /* First, determine if the reset is acceptable. */
-    if (pcb->state == SYN_SENT) {
-      if (ackno == pcb->snd_nxt) {
-        acceptable = 1;
+    if (pcb->state == SYN_SENT) {//当pcb处于SYN_SENT状态，SYN_SENT及主动打开后发送SYN报文后进入的状态
+      if (ackno == pcb->snd_nxt) {//且对方发送的确认号与pcb下次要发送的序号一直
+        acceptable = 1;//设置标志为1
       }
     } else {
       if (TCP_SEQ_BETWEEN(seqno, pcb->rcv_nxt, 
-                          pcb->rcv_nxt+pcb->rcv_wnd)) {
-        acceptable = 1;
+                          pcb->rcv_nxt+pcb->rcv_wnd)) {//其他状态，收到的报文序号在接收窗口内
+        acceptable = 1;//设置标志为1
       }
     }
 
     if (acceptable) {
       LWIP_DEBUGF(TCP_INPUT_DEBUG, ("tcp_process: Connection RESET\n"));
       LWIP_ASSERT("tcp_input: pcb->state != CLOSED", pcb->state != CLOSED);
-      recv_flags |= TF_RESET;
+      recv_flags |= TF_RESET;//设置recv_flags标志为RESET，在tcp_input函数中会根据这个标志发送RESET报文的
       pcb->flags &= ~TF_ACK_DELAY;
       return ERR_RST;
-    } else {
+    } else {//走这个分支，则是报文RST段为1，且不符合发送RESET报文的条件，认为收到的报文有问题，直接返回
       LWIP_DEBUGF(TCP_INPUT_DEBUG, ("tcp_process: unacceptable reset seqno %"U32_F" rcv_nxt %"U32_F"\n",
        seqno, pcb->rcv_nxt));
       LWIP_DEBUGF(TCP_DEBUG, ("tcp_process: unacceptable reset seqno %"U32_F" rcv_nxt %"U32_F"\n",
@@ -569,22 +579,29 @@ tcp_process(struct tcp_pcb *pcb)
       return ERR_OK;
     }
   }
-
+    /*这个if 说的是，如果已经建立连接，甚至已经断开了，
+    whatever，还有收到网路上流浪的SYN握手包，就直接回复一个ack包，其实我觉得回复不回复也没啥用
+    */
   if ((flags & TCP_SYN) && (pcb->state != SYN_SENT && pcb->state != SYN_RCVD)) { 
     /* Cope with new connection attempt after remote end crashed */
-    tcp_ack_now(pcb);
+    tcp_ack_now(pcb);//立刻回复ack包
     return ERR_OK;
   }
   
   /* Update the PCB (in)activity timer. */
-  pcb->tmr = tcp_ticks;
+  pcb->tmr = tcp_ticks;//这个没看懂，估计是用来计生存时间的?
   pcb->keep_cnt_sent = 0;
-
+  /*tcp_parseopt 函数进行tcp opt字段的解析，lwip主要支持mss和时间戳两种配置*/
   tcp_parseopt(pcb);
 
   /* Do different things depending on the TCP state. */
   switch (pcb->state) {
   case SYN_SENT:
+    /*当前状态是SYN_SENT状态，即客户端打开并发送SYN包后的状态
+    当收到服务器发送的SYN且ACK包，并判断ack序号与发送的序号加一是否一致，若一致则:
+    1 更新rcv_nxt 下一个要发送的序号 加一
+    2 
+    */
     LWIP_DEBUGF(TCP_INPUT_DEBUG, ("SYN-SENT: ackno %"U32_F" pcb->snd_nxt %"U32_F" unacked %"U32_F"\n", ackno,
      pcb->snd_nxt, ntohl(pcb->unacked->tcphdr->seqno)));
     /* received SYN ACK with expected sequence number? */
@@ -1446,11 +1463,11 @@ tcp_parseopt(struct tcp_pcb *pcb)
   u32_t tsval;
 #endif
 
-  opts = (u8_t *)tcphdr + TCP_HLEN;
+  opts = (u8_t *)tcphdr + TCP_HLEN;//调整指针 tcp头部长度20
 
   /* Parse the TCP MSS option, if present. */
-  if(TCPH_HDRLEN(tcphdr) > 0x5) {
-    max_c = (TCPH_HDRLEN(tcphdr) - 5) << 2;
+  if(TCPH_HDRLEN(tcphdr) > 0x5) {//为什么用5来判断?没明白
+    max_c = (TCPH_HDRLEN(tcphdr) - 5) << 2;//为什么要左移动2?
     for (c = 0; c < max_c; ) {
       opt = opts[c];
       switch (opt) {
@@ -1463,7 +1480,7 @@ tcp_parseopt(struct tcp_pcb *pcb)
         ++c;
         LWIP_DEBUGF(TCP_INPUT_DEBUG, ("tcp_parseopt: NOP\n"));
         break;
-      case 0x02:
+      case 0x02://0x02是mss最大可接受报文大小
         LWIP_DEBUGF(TCP_INPUT_DEBUG, ("tcp_parseopt: MSS\n"));
         if (opts[c + 1] != 0x04 || c + 0x04 > max_c) {
           /* Bad length */
@@ -1478,7 +1495,7 @@ tcp_parseopt(struct tcp_pcb *pcb)
         c += 0x04;
         break;
 #if LWIP_TCP_TIMESTAMPS
-      case 0x08:
+      case 0x08://0x08是时间戳
         LWIP_DEBUGF(TCP_INPUT_DEBUG, ("tcp_parseopt: TS\n"));
         if (opts[c + 1] != 0x0A || c + 0x0A > max_c) {
           /* Bad length */
@@ -1489,7 +1506,7 @@ tcp_parseopt(struct tcp_pcb *pcb)
         tsval = (opts[c+2]) | (opts[c+3] << 8) | 
           (opts[c+4] << 16) | (opts[c+5] << 24);
         if (flags & TCP_SYN) {
-          pcb->ts_recent = ntohl(tsval);
+          pcb->ts_recent = ntohl(tsval);//更新网络时间
           pcb->flags |= TF_TIMESTAMP;
         } else if (TCP_SEQ_BETWEEN(pcb->ts_lastacksent, seqno, seqno+tcplen)) {
           pcb->ts_recent = ntohl(tsval);
